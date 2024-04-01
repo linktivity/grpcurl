@@ -16,10 +16,15 @@ import (
 
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/grpcreflect"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	"google.golang.org/api/idtoken"
+	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/alts"
+	"google.golang.org/grpc/credentials/oauth"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -165,6 +170,16 @@ var (
 		permitted if they are both set to the same value, to increase backwards
 		compatibility with earlier releases that allowed both to be set).`))
 	reflection = optionalBoolFlag{val: true}
+	useIdToken = flags.String("use-id-token", "", prettify(`
+		When set, the specified value will be used as an ID token for the
+		authorization header. The audience for the token will be set to the
+		server address. The token will be acquired using the Google Application
+		Default Credentials mechanism.
+		NOTE: This flag supports only Google ID tokens. Can be "adc" or path of 
+		a JSON file containing credentials.`))
+	audienceAddress = flags.String("audience-address", "", prettify(`
+		The address of the server to be used as the audience for the ID token.
+		Defaults to the address that is provided in the positional arguments.`))
 )
 
 func init() {
@@ -546,6 +561,23 @@ func main() {
 		}
 		opts = append(opts, grpc.WithUserAgent(grpcurlUA))
 
+		if *useIdToken != "" {
+			var audience string
+			if *audienceAddress == "" {
+				audience = *audienceAddress
+			} else {
+				audience = "https://" + strings.Split(target, ":")[0]
+			}
+
+			ctx := context.Background()
+
+			source, err := IDTokenTokenSource(ctx, audience, *useIdToken)
+			if err != nil {
+				fail(err, "Failed to acquire token source")
+			}
+			opts = append(opts, grpc.WithPerRPCCredentials(oauth.TokenSource{TokenSource: source}))
+		}
+
 		blockingDialTiming := dialTiming.Child("BlockingDial")
 		defer blockingDialTiming.Done()
 		cc, err := grpcurl.BlockingDial(ctx, network, target, creds, opts...)
@@ -837,6 +869,48 @@ func dumpTiming(td *timingData, lvl int) {
 	for _, sd := range td.Sub {
 		dumpTiming(sd, lvl+1)
 	}
+}
+
+func IDTokenTokenSource(ctx context.Context, audience, useIdToken string) (oauth2.TokenSource, error) {
+	var tokenSourceOption option.ClientOption
+	if useIdToken == "adc" {
+		tokenSourceOption = option.WithTokenSource(nil)
+	} else {
+		tokenSourceOption = option.WithCredentialsFile(useIdToken)
+	}
+
+	ts, err := idtoken.NewTokenSource(ctx, audience, tokenSourceOption)
+	if err != nil {
+		// Generalized error handling for unsupported credentials type
+		gts, err := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
+		if err != nil {
+			return nil, err
+		}
+		ts = oauth2.ReuseTokenSource(nil, &idTokenSource{TokenSource: gts})
+	}
+	return ts, nil
+}
+
+type idTokenSource struct {
+	oauth2.TokenSource
+}
+
+func (s *idTokenSource) Token() (*oauth2.Token, error) {
+	token, err := s.TokenSource.Token()
+	if err != nil {
+		return nil, err
+	}
+
+	idToken, ok := token.Extra("id_token").(string)
+	if !ok {
+		return nil, fmt.Errorf("token did not contain an id_token")
+	}
+
+	return &oauth2.Token{
+		AccessToken: idToken,
+		TokenType:   "Bearer",
+		Expiry:      token.Expiry,
+	}, nil
 }
 
 func usage() {

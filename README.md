@@ -240,3 +240,12 @@ When using protosets, you can omit the server address (host:port or path to Unix
 when using the "list" and "describe" operations since they only need to consult the
 protoset files.
 
+### Google ID Token Authentication
+`grpcurl` supports Google ID token authentication. To use this feature, you need to
+Provide a path to a credential json file or specify it as the fixed value "adc" via the `-use-id-token` flag.
+
+When using the "adc" value, `grpcurl` will use the Application Default Credentials (ADC) to obtain the ID token.
+
+```shell
+grpcurl -use-id-token=adc grpc.server.com:443 my.custom.server.Service/Method
+```
